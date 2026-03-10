@@ -28,6 +28,65 @@ Verifier accepts:
 
 ## The 5-Phase Verification Workflow
 
+### Phase 0 — CONTEXT GATHERING (before anything else)
+
+**This is the most critical step.** Verification without sufficient context produces false results. The verifier's hardest job is checking mitigations in OTHER files — a modifier defined in a base contract, an access control check in a parent, a reentrancy guard inherited from OpenZeppelin. Without that context, Phase 2 is blind.
+
+**Before beginning verification, analyze the code snippet for context gaps:**
+
+1. **Inherited contracts**: Does the code use `is`, `extends`, `inherits`, or import base contracts? If yes → read those contracts or ask the user to provide them.
+2. **Imported libraries**: Is it a standard library (OpenZeppelin, Solmate, Anchor framework)? Note the version and apply known behavior. If custom library → ask for the source.
+3. **Cross-contract calls**: Does the code call external contracts (`oracle.getPrice()`, `pool.swap()`, `token.transfer()`)? If yes → ask for the called contract's relevant functions. Cross-contract context is the #1 source of false positives and false negatives.
+4. **State variables not shown**: Are there storage variables referenced but not declared in the snippet (`balances`, `totalSupply`, `owner`)? Ask for the full contract storage layout or the variable declarations.
+5. **Modifiers not shown**: Does the function use modifiers (`onlyOwner`, `nonReentrant`, `whenNotPaused`) that aren't defined in the snippet? These are critical — a missing `nonReentrant` modifier in the snippet doesn't mean it's missing in the code.
+6. **Constructor / initializer**: For access control findings, the constructor or initializer sets up roles. Ask for it if not provided.
+7. **Proxy pattern**: Is this contract deployed behind a proxy? If yes, storage layout and upgrade logic matter. Ask for the proxy contract.
+
+**Decision logic:**
+
+```
+IF the code snippet is self-contained (no external calls, no inheritance, no undefined modifiers):
+    → Proceed to Phase 1. Confidence can be HIGH.
+
+IF the snippet has 1-2 minor context gaps (e.g., standard OZ imports):
+    → Proceed to Phase 1, note assumptions. Confidence capped at MEDIUM.
+
+IF the snippet has critical context gaps (cross-contract calls, missing modifiers,
+undefined state variables that affect the finding):
+    → Output a CONTEXT REQUEST before proceeding.
+    → List exactly what is needed.
+    → Do NOT guess at mitigations that might exist in unseen code.
+    → Do NOT proceed to Phase 2 with incomplete context — this produces unreliable results.
+```
+
+**CONTEXT REQUEST format** (output this instead of proceeding when context is insufficient):
+
+```
+CONTEXT REQUEST
+===============
+Finding: [title]
+Status: Insufficient context for reliable verification.
+
+Before I can verify this finding, I need:
+1. [specific file/function/contract needed and why]
+2. [specific file/function/contract needed and why]
+...
+
+What I can determine so far:
+- [any preliminary observations possible with current context]
+
+Confidence without this context: LOW
+Risk of false [positive/negative] without this context: HIGH
+```
+
+**If running inside a project directory**: Use file reading tools (Glob, Grep, Read) to proactively find the missing context in the codebase before asking the user. Search for:
+- The contract name referenced in imports/inheritance
+- The modifier definitions
+- The external contract interfaces
+- The state variable declarations
+
+Only ask the user if the context cannot be found in the current project.
+
 ### Phase 1 — INTAKE & CONTEXT MAPPING
 
 1. Parse the finding: identify the claimed vulnerability class, claimed impact, and code path involved
@@ -127,3 +186,29 @@ See `integration-guide.md` for exact invocation format.
 3. **Confidence: HIGH** only when you can trace the full exploit path with no ambiguity. **MEDIUM** when preconditions are uncertain. **LOW** when critical context is missing.
 4. If code snippet is insufficient to verify, output **"Needs More Context"** and list exactly what is missing
 5. **Do not hedge** with "potentially" or "might" in the verdict — be definitive or say Needs More Context
+
+## Honest Limitations
+
+What verifier is good at and where it falls short. Know the ceiling.
+
+**Excellent — trust the output:**
+- Eliminating false positives quickly (the primary value proposition)
+- Classifying and structuring valid known-class vulnerabilities (reentrancy, access control, overflow, oracle manipulation, etc.)
+- Consistent structured output across many findings in a session
+- Devil's advocate counterarguments that catch overconfident initial assessments
+- Severity calibration against Immunefi/Sherlock standards
+
+**Useful but not sufficient — verify manually:**
+- Complex protocol-specific business logic bugs (incentive misalignment, multi-step economic attacks)
+- Emergent multi-contract exploit chains where the vulnerability spans 3+ contracts
+- Novel vulnerability classes not covered in `verification-framework.md`
+- Findings that depend on off-chain components (keepers, oracles, L1-L2 messaging timing)
+
+**Does not replace — always do this yourself:**
+- Adversarial manual reasoning on High/Critical candidates
+- Full protocol invariant analysis
+- Economic modeling and game theory review
+- On-chain state verification (current TVL, token balances, oracle prices)
+- Cross-chain interaction security
+
+**The confidence signal is the key output.** When verifier returns HIGH confidence, the verdict is reliable. When it returns LOW confidence or Needs More Context, that is your signal to do the manual pass — not to trust the output anyway.
